@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Snake</title>
+<style>
+  :root {
+    --bg: #12161c;
+    --panel: #1a2029;
+    --grid: #1f2732;
+    --snake: #4ade80;
+    --snake-head: #86efac;
+    --food: #f87171;
+    --text: #e5e9f0;
+    --muted: #8b97a8;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: manipulation;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  .scores {
+    display: flex;
+    gap: 24px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .scores div { text-align: center; }
+
+  .scores .label {
+    display: block;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+  }
+
+  .scores .value { font-size: 1.4rem; font-weight: 600; }
+
+  .stage {
+    position: relative;
+    width: min(92vw, 92vh - 180px, 480px);
+    aspect-ratio: 1;
+  }
+
+  canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    background: var(--panel);
+    border-radius: 8px;
+  }
+
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    text-align: center;
+    padding: 16px;
+    border-radius: 8px;
+    background: rgba(18, 22, 28, 0.82);
+  }
+
+  .overlay[hidden] { display: none; }
+
+  .overlay .title { font-size: 1.5rem; font-weight: 600; }
+  .overlay .hint { font-size: 0.85rem; color: var(--muted); }
+
+  footer {
+    font-size: 0.8rem;
+    color: var(--muted);
+    text-align: center;
+    max-width: 30rem;
+  }
+
+  kbd {
+    background: var(--grid);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font: inherit;
+    font-size: 0.85em;
+  }
+</style>
+</head>
+<body>
+
+<h1>Snake</h1>
+
+<div class="scores">
+  <div><span class="label">Score</span><span class="value" id="score">0</span></div>
+  <div><span class="label">Best</span><span class="value" id="best">0</span></div>
+</div>
+
+<div class="stage">
+  <canvas id="board" width="480" height="480"></canvas>
+  <div class="overlay" id="overlay">
+    <div class="title" id="overlay-title">Snake</div>
+    <div class="hint" id="overlay-hint">Press any arrow key to start</div>
+  </div>
+</div>
+
+<footer>
+  <kbd>&larr;</kbd> <kbd>&uarr;</kbd> <kbd>&darr;</kbd> <kbd>&rarr;</kbd> or <kbd>WASD</kbd> to steer &middot;
+  <kbd>Space</kbd> to pause &middot; <kbd>R</kbd> to restart &middot; swipe on touch
+</footer>
+
+<script>
+(() => {
+  'use strict';
+
+  const CELLS = 20;        // the grid is CELLS x CELLS
+  const CELL = 24;         // pixels per cell, so the canvas is CELLS * CELL
+  const START_MS = 140;    // ms per step at the start
+  const MIN_MS = 70;       // fastest the snake ever moves
+  const SPEEDUP_MS = 3;    // ms shaved off per food eaten
+
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+  const overlay = document.getElementById('overlay');
+  const overlayTitle = document.getElementById('overlay-title');
+  const overlayHint = document.getElementById('overlay-hint');
+
+  // state is 'ready' | 'playing' | 'paused' | 'over'
+  let state, snake, dir, queued, food, score, stepMs, accumulator, lastFrame;
+  let best = loadBest();
+
+  function loadBest() {
+    try {
+      return Number(localStorage.getItem('snake.best')) || 0;
+    } catch (e) {
+      return 0;   // private window, or site data blocked
+    }
+  }
+
+  function saveBest(value) {
+    try {
+      localStorage.setItem('snake.best', String(value));
+    } catch (e) {
+      // nothing to do, the run still shows on screen
+    }
+  }
+
+  function reset() {
+    state = 'ready';
+    snake = [{ x: 10, y: 10 }, { x: 9, y: 10 }, { x: 8, y: 10 }];
+    dir = { x: 1, y: 0 };
+    queued = [];
+    score = 0;
+    stepMs = START_MS;
+    accumulator = 0;
+    placeFood();
+    updateScores();
+    showOverlay('Snake', 'Press any arrow key to start');
+  }
+
+  function placeFood() {
+    const free = [];
+    for (let y = 0; y < CELLS; y++) {
+      for (let x = 0; x < CELLS; x++) {
+        if (!snake.some(s => s.x === x && s.y === y)) free.push({ x: x, y: y });
+      }
+    }
+    // No free cell means the snake fills the board, which the caller treats as a win.
+    food = free.length ? free[Math.floor(Math.random() * free.length)] : null;
+  }
+
+  function updateScores() {
+    scoreEl.textContent = score;
+    bestEl.textContent = best;
+  }
+
+  function showOverlay(title, hint) {
+    overlayTitle.textContent = title;
+    overlayHint.textContent = hint;
+    overlay.hidden = false;
+  }
+
+  function step() {
+    // One turn per step, so a fast double-tap cannot fold the snake back on itself.
+    const next = queued.shift();
+    if (next) dir = next;
+
+    const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+    const hitWall = head.x < 0 || head.y < 0 || head.x >= CELLS || head.y >= CELLS;
+    // The tail cell empties on this same step, so it does not count as a collision.
+    const hitSelf = snake.some((s, i) => i < snake.length - 1 && s.x === head.x && s.y === head.y);
+
+    if (hitWall || hitSelf) return gameOver();
+
+    snake.unshift(head);
+
+    if (food && head.x === food.x && head.y === food.y) {
+      score++;
+      if (score > best) { best = score; saveBest(best); }
+      updateScores();
+      stepMs = Math.max(MIN_MS, stepMs - SPEEDUP_MS);
+      placeFood();
+      if (!food) return win();
+    } else {
+      snake.pop();
+    }
+  }
+
+  function gameOver() {
+    state = 'over';
+    showOverlay('Game over', 'Score ' + score + ' — press R or tap to play again');
+  }
+
+  function win() {
+    state = 'over';
+    showOverlay('You filled the board', 'Score ' + score + ' — press R or tap to play again');
+  }
+
+  function draw() {
+    ctx.fillStyle = getCss('--panel');
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.strokeStyle = getCss('--grid');
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 1; i < CELLS; i++) {
+      ctx.moveTo(i * CELL + 0.5, 0);
+      ctx.lineTo(i * CELL + 0.5, canvas.height);
+      ctx.moveTo(0, i * CELL + 0.5);
+      ctx.lineTo(canvas.width, i * CELL + 0.5);
+    }
+    ctx.stroke();
+
+    if (food) {
+      ctx.fillStyle = getCss('--food');
+      cell(food.x, food.y, 5);
+    }
+
+    snake.forEach((seg, i) => {
+      ctx.fillStyle = i === 0 ? getCss('--snake-head') : getCss('--snake');
+      cell(seg.x, seg.y, 2);
+    });
+  }
+
+  function cell(gx, gy, inset) {
+    const x = gx * CELL + inset;
+    const y = gy * CELL + inset;
+    const size = CELL - inset * 2;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, size, size, 5);
+    else ctx.rect(x, y, size, size);
+    ctx.fill();
+  }
+
+  const cssCache = {};
+  function getCss(name) {
+    if (!cssCache[name]) {
+      cssCache[name] = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+    return cssCache[name];
+  }
+
+  function frame(now) {
+    const dt = Math.min(now - (lastFrame === undefined ? now : lastFrame), 250);  // ignore tab-away gaps
+    lastFrame = now;
+
+    if (state === 'playing') {
+      accumulator += dt;
+      while (accumulator >= stepMs && state === 'playing') {
+        accumulator -= stepMs;
+        step();
+      }
+    }
+
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  function turn(x, y) {
+    // Compare against the last queued turn, so holding keys queues a legal path.
+    const from = queued.length ? queued[queued.length - 1] : dir;
+    if (from.x === -x && from.y === -y) return;   // no instant reversal
+    if (from.x === x && from.y === y) return;     // already heading that way
+    if (queued.length < 2) queued.push({ x: x, y: y });
+
+    if (state === 'ready') start();
+  }
+
+  function start() {
+    state = 'playing';
+    accumulator = 0;
+    overlay.hidden = true;
+  }
+
+  function togglePause() {
+    if (state === 'playing') {
+      state = 'paused';
+      showOverlay('Paused', 'Press Space to resume');
+    } else if (state === 'paused') {
+      start();
+    }
+  }
+
+  document.addEventListener('keydown', e => {
+    switch (e.key) {
+      case 'ArrowUp': case 'w': case 'W':    turn(0, -1); break;
+      case 'ArrowDown': case 's': case 'S':  turn(0, 1); break;
+      case 'ArrowLeft': case 'a': case 'A':  turn(-1, 0); break;
+      case 'ArrowRight': case 'd': case 'D': turn(1, 0); break;
+      case ' ':                              togglePause(); break;
+      case 'r': case 'R':                    reset(); break;
+      default: return;
+    }
+    e.preventDefault();   // keep arrows and space from scrolling the page
+  });
+
+  // Touch: swipe to steer, tap to start, pause or restart.
+  let touchStart = null;
+
+  canvas.addEventListener('touchstart', e => {
+    const t = e.changedTouches[0];
+    touchStart = { x: t.clientX, y: t.clientY };
+  }, { passive: true });
+
+  canvas.addEventListener('touchend', e => {
+    if (!touchStart) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touchStart.x;
+    const dy = t.clientY - touchStart.y;
+    touchStart = null;
+
+    if (Math.abs(dx) < 24 && Math.abs(dy) < 24) {
+      if (state === 'over') reset();
+      else if (state === 'ready') start();
+      else togglePause();
+      return;
+    }
+
+    if (Math.abs(dx) > Math.abs(dy)) turn(Math.sign(dx), 0);
+    else turn(0, Math.sign(dy));
+  }, { passive: true });
+
+  canvas.addEventListener('click', () => {
+    if (state === 'over') reset();
+    else if (state === 'ready') start();
+  });
+
+  // Losing focus mid-run should not cost you the game.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && state === 'playing') togglePause();
+  });
+
+  reset();
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
