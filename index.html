@@ -302,13 +302,15 @@
   }
 
   function turn(x, y) {
+    // Any arrow starts the game, including the one the snake already faces.
+    // This has to come first, or the guards below swallow the key press.
+    if (state === 'ready') start();
+
     // Compare against the last queued turn, so holding keys queues a legal path.
     const from = queued.length ? queued[queued.length - 1] : dir;
     if (from.x === -x && from.y === -y) return;   // no instant reversal
     if (from.x === x && from.y === y) return;     // already heading that way
     if (queued.length < 2) queued.push({ x: x, y: y });
-
-    if (state === 'ready') start();
   }
 
   function start() {
